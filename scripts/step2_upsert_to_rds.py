@@ -33,17 +33,20 @@ class DocumentChunk:
     embedding: List[float] = None
 
 
-class RDSUpsert:
-    """Upsert pre-generated embeddings to RDS PostgreSQL."""
+class PostgresUpsert:
+    """Upsert pre-generated embeddings to PostgreSQL (Neon, RDS, etc.)."""
 
-    def __init__(self, db_host: str, db_name: str, db_user: str, db_password: str):
-        self.conn = psycopg2.connect(
-            host=db_host,
-            database=db_name,
-            user=db_user,
-            password=db_password,
-            sslmode="require"
-        )
+    def __init__(self, database_url: str = None, db_host: str = None, db_name: str = None, db_user: str = None, db_password: str = None):
+        if database_url:
+            self.conn = psycopg2.connect(database_url, sslmode="require")
+        else:
+            self.conn = psycopg2.connect(
+                host=db_host,
+                database=db_name,
+                user=db_user,
+                password=db_password,
+                sslmode="require"
+            )
         self.cursor = self.conn.cursor()
 
     def load_embeddings(self, cache_path: str) -> List[DocumentChunk]:
@@ -134,23 +137,32 @@ class RDSUpsert:
 
 
 def main():
-    db_host = os.getenv("DB_HOST")
-    db_name = os.getenv("DB_NAME", "novaragdb")
-    db_user = os.getenv("DB_USER", "novaragadmin")
-    db_password = os.getenv("DB_PASSWORD")
-
-    if not db_host or not db_password:
-        logger.error("DB_HOST and DB_PASSWORD must be set in .env")
-        return
-
     # Check if embeddings cache exists
     if not os.path.exists(EMBEDDINGS_CACHE):
         logger.error(f"Embeddings cache not found: {EMBEDDINGS_CACHE}")
         logger.error("Run step1_generate_embeddings.py first!")
         return
 
-    # Upsert to RDS
-    upserter = RDSUpsert(db_host, db_name, db_user, db_password)
+    # Option 1: DATABASE_URL (Neon, Railway, etc.)
+    database_url = os.getenv("DATABASE_URL")
+
+    # Option 2: Individual params (RDS, etc.)
+    db_host = os.getenv("DB_HOST")
+    db_name = os.getenv("DB_NAME", "novaragdb")
+    db_user = os.getenv("DB_USER", "novaragadmin")
+    db_password = os.getenv("DB_PASSWORD")
+
+    if not database_url and not db_host:
+        logger.error("Set DATABASE_URL or DB_HOST in .env")
+        return
+
+    # Connect to PostgreSQL
+    if database_url:
+        logger.info("Connecting via DATABASE_URL...")
+        upserter = PostgresUpsert(database_url=database_url)
+    else:
+        logger.info(f"Connecting to {db_host}...")
+        upserter = PostgresUpsert(db_host=db_host, db_name=db_name, db_user=db_user, db_password=db_password)
 
     try:
         chunks = upserter.load_embeddings(EMBEDDINGS_CACHE)

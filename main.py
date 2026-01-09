@@ -36,14 +36,22 @@ logger = logging.getLogger(__name__)
 # ==============
 
 def get_db_connection():
-    """Get database connection (Supabase or RDS)."""
-    # Try Supabase first
+    """Get database connection (Neon, RDS, or Supabase)."""
+    # Option 1: DATABASE_URL (Neon, Railway, Render, etc.)
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        import psycopg2
+        conn = psycopg2.connect(database_url, sslmode="require")
+        logger.info("Connected via DATABASE_URL")
+        return conn
+
+    # Option 2: Supabase client
     supabase_url = os.getenv("SUPABASE_URL")
     if supabase_url and "your-project" not in supabase_url:
         from supabase import create_client
         return create_client(supabase_url, os.getenv("SUPABASE_KEY"))
 
-    # Fall back to RDS PostgreSQL
+    # Option 3: Individual connection params (RDS, etc.)
     db_host = os.getenv("DB_HOST")
     if db_host:
         import psycopg2
@@ -56,7 +64,7 @@ def get_db_connection():
         )
         return conn
 
-    logger.error("No database configured! Set up either Supabase or RDS.")
+    logger.error("No database configured! Set DATABASE_URL or DB_HOST.")
     return None
 
 
