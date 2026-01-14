@@ -2,6 +2,8 @@
 
 Agentic RAG using AWS Bedrock (Nova + Titan) and Pydantic AI framework.
 
+## [Read the full story →](https://towardsaws.com/from-failed-local-llms-to-serverless-success-my-agentic-rag-journey-450b64249192)
+
 ## What is it?
 
 A smarter RAG that chooses retrieval strategies instead of just semantic search:
