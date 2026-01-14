@@ -9,7 +9,7 @@
   "containerDefinitions": [
     {
       "name": "nova-rag",
-      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/nova-rag:${IMAGE_TAG}",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}",
       "cpu": 512,
       "memory": 1024,
       "essential": true,
@@ -25,20 +25,8 @@
           "value": "${AWS_REGION}"
         },
         {
-          "name": "DB_HOST",
-          "value": "${DB_HOST}"
-        },
-        {
-          "name": "DB_NAME",
-          "value": "${DB_NAME}"
-        },
-        {
-          "name": "DB_USER",
-          "value": "${DB_USER}"
-        },
-        {
-          "name": "DB_PASSWORD",
-          "value": "${DB_PASSWORD}"
+          "name": "DATABASE_URL",
+          "value": "${DATABASE_URL}"
         },
         {
           "name": "AWS_ACCESS_KEY_ID",
@@ -63,7 +51,7 @@
           "curl -f http://localhost:8000/health || exit 1"
         ],
         "interval": 30,
-        "timeout": 5,
+        "timeout": 10,
         "retries": 3,
         "startPeriod": 60
       }

@@ -36,14 +36,22 @@ logger = logging.getLogger(__name__)
 # ==============
 
 def get_db_connection():
-    """Get database connection (Supabase or RDS)."""
-    # Try Supabase first
+    """Get database connection (Neon, RDS, or Supabase)."""
+    # Option 1: DATABASE_URL (Neon, Railway, Render, etc.)
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        import psycopg2
+        conn = psycopg2.connect(database_url, sslmode="require")
+        logger.info("Connected via DATABASE_URL")
+        return conn
+
+    # Option 2: Supabase client
     supabase_url = os.getenv("SUPABASE_URL")
     if supabase_url and "your-project" not in supabase_url:
         from supabase import create_client
         return create_client(supabase_url, os.getenv("SUPABASE_KEY"))
 
-    # Fall back to RDS PostgreSQL
+    # Option 3: Individual connection params (RDS, etc.)
     db_host = os.getenv("DB_HOST")
     if db_host:
         import psycopg2
@@ -56,11 +64,47 @@ def get_db_connection():
         )
         return conn
 
-    logger.error("No database configured! Set up either Supabase or RDS.")
+    logger.error("No database configured! Set DATABASE_URL or DB_HOST.")
     return None
 
 
-db = get_db_connection()
+# Global connection (will be initialized/reconnected as needed)
+db = None
+
+def get_or_reconnect_db():
+    """Get existing connection or reconnect if needed."""
+    global db
+    if db is None:
+        db = get_db_connection()
+        return db
+
+    # Check if psycopg2 connection is closed (no ping - Neon pooler can be slow)
+    if hasattr(db, 'closed') and db.closed:
+        logger.info("Connection closed, reconnecting...")
+        db = get_db_connection()
+
+    return db
+
+
+def execute_with_retry(cursor, sql, params=None, max_retries=2):
+    """Execute SQL with retry logic for Neon pooler connection drops."""
+    import psycopg2
+    for attempt in range(max_retries + 1):
+        try:
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+            return
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            if "closed" in str(e).lower() or "ssl" in str(e).lower():
+                if attempt < max_retries:
+                    logger.info(f"Connection lost, retrying... (attempt {attempt + 1}/{max_retries})")
+                    global db
+                    db = get_db_connection()  # Reconnect
+                    # Create new cursor with fresh connection
+                    return execute_with_retry(db.cursor(), sql, params, max_retries)
+            raise
 
 
 @dataclass
@@ -94,7 +138,9 @@ class BedrockEmbeddingModel:
 
 # Initialize models
 aws_region = os.getenv("AWS_REGION", "ap-southeast-2")
-chat_model = BedrockConverseModel('amazon.nova-lite-v1:0')
+from pydantic_ai.providers.bedrock import BedrockProvider
+bedrock_provider = BedrockProvider(region_name=aws_region)
+chat_model = BedrockConverseModel('amazon.nova-lite-v1:0', provider=bedrock_provider)
 embedding_model = BedrockEmbeddingModel(region=aws_region)
 
 
@@ -105,42 +151,42 @@ embedding_model = BedrockEmbeddingModel(region=aws_region)
 SYSTEM_PROMPT = """
 You are an expert at Pydantic AI - a Python AI agent framework.
 
-You have access to comprehensive documentation through THREE RETRIEVAL STRATEGIES:
+You have access to comprehensive documentation through AGENTIC RAG - you can intelligently explore the knowledge base instead of relying on a single search.
 
-## Strategy 1: Semantic Search (retrieve_relevant_documentation)
-Best for: Quick retrieval based on meaning, when you know relevant keywords
-- Returns top 5 most relevant chunks based on vector similarity
-- Includes metadata showing total chunks available per page
-- Use this FIRST for most questions
+## Your Tools (use them in sequence when needed):
 
-## Strategy 2: Browse Documentation (list_documentation_pages)
-Best for: When semantic search might miss relevant pages
-- Lists ALL available documentation pages with titles
-- Use when:
-  * Semantic search returns poor/no results
-  * You need to understand what topics are covered
-  * Different terminology might be used than your search terms
-  * User asks "what topics are covered?" or similar
+### 1. retrieve_relevant_documentation(query, top_k=5)
+   - Fast semantic vector search
+   - Returns the most relevant document chunks
+   - **USE THIS FIRST** for every question
 
-## Strategy 3: Full Document View (get_page_content)
-Best for: Getting complete context when chunks are incomplete
-- Returns ALL chunks from a page in order
-- Use when:
-  * Retrieved chunks seem incomplete or fragmented
-  * Content says "see more" or references other sections
-  * You need full context to provide accurate answer
-  * The page has many chunks and you need everything
+### 2. list_documentation_pages()
+   - Lists ALL available documentation pages with their TITLES
+   - Shows you what pages exist in the knowledge base
+   - Use when retrieve_relevant_documentation doesn't give you enough context
 
-## AGENTIC RAG APPROACH:
-Traditional RAG is a "one-trick pony" - only semantic search. You are SMARTER.
-You can CHOOSE the best strategy based on the question:
+### 3. get_page_content(url)
+   - Gets COMPLETE content from a specific page (all chunks combined)
+   - Use this when you need the FULL context from a page
+   - Call with an EXACT URL from list_documentation_pages()
 
-1. Most questions: Start with retrieve_relevant_documentation (fastest)
-2. Poor results or terminology mismatch: Try list_documentation_pages to browse
-3. Incomplete chunks: Use get_page_content for full context
+## CRITICAL - When Basic RAG Isn't Enough:
 
-THINK before answering: Which strategy best serves this question? Use multiple
-strategies if needed. Be honest when documentation doesn't contain the answer.
+If retrieve_relevant_documentation returns incomplete information (e.g., code examples that seem cut off, missing parts), you MUST:
+
+1. Call list_documentation_pages() to see ALL available page titles
+2. **Look for TITLES** that match what the user wants (e.g., "weather", "example", "agent", "tool")
+3. Call get_page_content(url) with the URL that has the matching title
+
+The agent CANNOT see the content until it calls get_page_content() - so if the initial search doesn't give enough detail, it MUST explore the full page.
+
+## Example Workflow:
+User: "Show me the weather_agent code example"
+1. retrieve_relevant_documentation("weather_agent code example") → might return fragments
+2. list_documentation_pages() → find TITLE containing "weather" or "example"
+3. get_page_content(url) → get the complete content from that page
+
+Always think: "Do I have enough information to answer this question completely?" If not, explore further!
 """
 
 
@@ -161,7 +207,7 @@ def is_supabase(db) -> bool:
 async def retrieve_relevant_documentation(
     ctx: RunContext[Deps],
     user_query: str,
-    top_k: int = 5,
+    top_k: int = 3,
 ) -> str:
     """STRATEGY 1 - Semantic Search: Find relevant chunks by meaning.
 
@@ -229,8 +275,12 @@ async def retrieve_relevant_documentation(
         return metadata + "\n\n" + "\n\n---\n\n".join(formatted_chunks)
     else:
         # RDS PostgreSQL path - convert list to vector string for PostgreSQL
+        # Get fresh connection for each query to handle Neon pooler timeouts
+        from main import get_or_reconnect_db
+        fresh_db = get_or_reconnect_db()
+        cursor = fresh_db.cursor()
+        # Convert embedding list to vector string for PostgreSQL
         embedding_str = f"[{','.join(map(str, query_embedding))}]"
-        cursor = ctx.deps.db.cursor()
         cursor.execute(
             "SELECT url, title, content FROM match_site_pages(%s::vector, %s, %s)",
             (embedding_str, top_k, json.dumps({'source': 'pydantic_ai_docs'}))
@@ -277,7 +327,7 @@ async def retrieve_relevant_documentation(
 @rag_agent.tool
 async def list_documentation_pages(
     ctx: RunContext[Deps],
-    limit: int = 200,
+    limit: int = 50,
 ) -> str:
     """Browse ALL available Pydantic AI documentation pages (sitemap/table of contents).
 
@@ -338,7 +388,10 @@ async def list_documentation_pages(
         return "\n".join(formatted)
 
     else:
-        cursor = ctx.deps.db.cursor()
+        # Get fresh connection for each query
+        from main import get_or_reconnect_db
+        fresh_db = get_or_reconnect_db()
+        cursor = fresh_db.cursor()
         cursor.execute(
             "SELECT DISTINCT url, title FROM site_pages WHERE metadata->>'source' = 'pydantic_ai_docs' LIMIT %s",
             (limit * 2,)
@@ -410,7 +463,9 @@ async def get_page_content(
 
         if not result.data:
             # Try to suggest similar URLs
-            cursor = ctx.deps.db.cursor()
+            from main import get_or_reconnect_db
+            fresh_db = get_or_reconnect_db()
+            cursor = fresh_db.cursor()
             cursor.execute(
                 "SELECT DISTINCT url FROM site_pages WHERE metadata->>'source' = 'pydantic_ai_docs' LIMIT 20"
             )
@@ -420,12 +475,16 @@ async def get_page_content(
         page_title = result.data[0]['title'].split(' - ')[0]
         formatted = [f"# {page_title}\n"]
 
-        for chunk in result.data:
+        # Limit to first 5 chunks to avoid token overflow
+        for chunk in result.data[:5]:
             formatted.append(chunk['content'])
 
         return "\n\n".join(formatted)
     else:
-        cursor = ctx.deps.db.cursor()
+        # Get fresh connection for each query
+        from main import get_or_reconnect_db
+        fresh_db = get_or_reconnect_db()
+        cursor = fresh_db.cursor()
         cursor.execute(
             "SELECT title, content FROM site_pages WHERE url = %s AND metadata->>'source' = 'pydantic_ai_docs' ORDER BY chunk_number",
             (url,)
@@ -443,7 +502,8 @@ async def get_page_content(
         page_title = results[0][0].split(' - ')[0]
         formatted = [f"# {page_title}\n"]
 
-        for row in results:
+        # Limit to first 5 chunks to avoid token overflow
+        for row in results[:5]:
             formatted.append(row[1])
 
         return "\n\n".join(formatted)
