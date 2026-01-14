@@ -7,17 +7,78 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Optional
+import subprocess
 import requests
 from dotenv import load_dotenv
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.styles import Style
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.application import run_in_terminal
 
 # Load environment variables
 load_dotenv()
 
 # Default API URL - can be overridden by env var or CLI arg
-DEFAULT_API_URL = os.getenv("NOVARAG_API_URL", "http://localhost:8000")
+DEFAULT_API_URL = os.getenv("NOVARAG_API_URL", None)
 
-# ANSI color codes
+# History file path
+HISTORY_PATH = Path.home() / ".novarag_history"
+
+# Commands for auto-completion
+COMMANDS = ["/quit", "/exit", "/q", "/stats", "/health", "/clear", "/help"]
+
+
+def get_ecs_ip() -> Optional[str]:
+    """Auto-discover ECS task IP if running in AWS environment."""
+    try:
+        cluster = os.getenv("ECS_CLUSTER_NAME", "nova-rag-cluster")
+        region = os.getenv("AWS_REGION", "ap-southeast-2")
+
+        result = subprocess.run(
+            ["aws", "ecs", "list-tasks", "--cluster", cluster, "--region", region, "--query", "taskArns[0]", "--output", "text"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+
+        task_arn = result.stdout.strip()
+        result = subprocess.run(
+            ["aws", "ecs", "describe-tasks", "--cluster", cluster, "--tasks", task_arn, "--region", region,
+             "--query", "tasks[0].attachments[0].details[?name==`networkInterfaceId`].value", "--output", "text"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return None
+
+        eni = result.stdout.strip()
+        result = subprocess.run(
+            ["aws", "ec2", "describe-network-interfaces", "--network-interface-ids", eni, "--region", region,
+             "--query", "NetworkInterfaces[0].Association.PublicIp", "--output", "text"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return None
+
+        return f"http://{result.stdout.strip()}:8000"
+    except Exception:
+        return None
+
+
+# Auto-discover ECS IP if not set
+if DEFAULT_API_URL is None:
+    discovered_ip = get_ecs_ip()
+    DEFAULT_API_URL = discovered_ip if discovered_ip else "http://localhost:8000"
+
+
+# ANSI color codes for print statements (prompt_toolkit handles the prompt colors)
 class Colors:
     RESET = "\033[0m"
     BOLD = "\033[1m"
@@ -32,16 +93,6 @@ class Colors:
     MAGENTA = "\033[35m"
     CYAN = "\033[36m"
     WHITE = "\033[37m"
-
-    # Background colors
-    BG_BLACK = "\033[40m"
-    BG_RED = "\033[41m"
-    BG_GREEN = "\033[42m"
-    BG_YELLOW = "\033[43m"
-    BG_BLUE = "\033[44m"
-    BG_MAGENTA = "\033[45m"
-    BG_CYAN = "\033[46m"
-    BG_WHITE = "\033[47m"
 
 
 class Emoji:
@@ -60,6 +111,13 @@ class Emoji:
     TOOL = "🛠️"
 
 
+# Prompt style
+STYLE = Style.from_dict({
+    "prompt": "ansigreen bold",
+    "command": "ansicyan",
+})
+
+
 class NovaRAGCLI:
     """CLI for NovaRAG service."""
 
@@ -68,6 +126,18 @@ class NovaRAGCLI:
         self.verbose = verbose
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+        self.session_id = None
+
+        # Create prompt session with history and auto-completion
+        self.history = FileHistory(str(HISTORY_PATH))
+        self.completer = WordCompleter(COMMANDS, ignore_case=True)
+        self.session_prompt = PromptSession(
+            history=self.history,
+            auto_suggest=AutoSuggestFromHistory(),
+            completer=self.completer,
+            style=STYLE,
+            enable_history_search=True,
+        )
 
     def _print(self, message: str, color: str = Colors.RESET, emoji: str = ""):
         """Print a colored message with optional emoji."""
@@ -93,20 +163,19 @@ class NovaRAGCLI:
 
         print(f"\n{Colors.BOLD}{Emoji.CHART} Query Statistics:{Colors.RESET}")
         for key, value in stats.items():
-            emoji = {
+            emoji_map = {
                 "Latency": Emoji.CLOCK,
                 "Input Tokens": Emoji.DOCUMENT,
                 "Output Tokens": Emoji.DOCUMENT,
                 "Total Tokens": Emoji.BRAIN,
                 "Estimated Cost": Emoji.MONEY,
-            }.get(key, "")
+            }
+            emoji = emoji_map.get(key, "")
             print(f"  {Colors.DIM}•{Colors.RESET} {key:18}: {Colors.GREEN}{value}{Colors.RESET}")
 
-        # Print tools used in order
         if tools_used:
             print(f"\n{Colors.BOLD}{Emoji.TOOL} Tools Used (in order):{Colors.RESET}")
             for i, tool in enumerate(tools_used, 1):
-                # Format tool name: replace underscores with spaces, capitalize
                 formatted_tool = tool.replace('_', ' ').title()
                 print(f"  {Colors.DIM}{i}.{Colors.RESET} {Colors.CYAN}{formatted_tool}{Colors.RESET}")
         else:
@@ -114,7 +183,6 @@ class NovaRAGCLI:
 
     def _print_answer(self, answer: str):
         """Print the answer with formatting."""
-        # Remove <thinking> tags and content between them
         start_tag = "<thinking>"
         end_tag = "</thinking>"
 
@@ -131,11 +199,22 @@ class NovaRAGCLI:
 
         print(f"\n{Colors.BOLD}{Emoji.CHAT} Answer:{Colors.RESET}")
         print(f"{Colors.BLUE}{'─' * 60}{Colors.RESET}\n")
-
-        # Print the answer directly
         print(clean_answer)
-
         print(f"\n{Colors.BLUE}{'─' * 60}{Colors.RESET}")
+
+    def _print_help(self):
+        """Print help information."""
+        print(f"\n{Colors.BOLD}Available Commands:{Colors.RESET}")
+        print(f"  {Colors.CYAN}/help{Colors.RESET}     - Show this help message")
+        print(f"  {Colors.CYAN}/stats{Colors.RESET}    - Show overall statistics")
+        print(f"  {Colors.CYAN}/health{Colors.RESET}   - Check service health")
+        print(f"  {Colors.CYAN}/clear{Colors.RESET}    - Clear the screen")
+        print(f"  {Colors.CYAN}/quit{Colors.RESET}     - Exit the CLI")
+        print(f"\n{Colors.DIM}Tips:{Colors.RESET}")
+        print(f"  • Use {Colors.YELLOW}↑/↓ arrows{Colors.RESET} to navigate history")
+        print(f"  • Use {Colors.YELLOW}Ctrl+R{Colors.RESET} to search history")
+        print(f"  • Use {Colors.YELLOW}Tab{Colors.RESET} to autocomplete commands")
+        print(f"  • Type anything else to query the RAG system\n")
 
     def health_check(self) -> bool:
         """Check if the API is healthy."""
@@ -180,10 +259,8 @@ class NovaRAGCLI:
                 data = response.json()
                 self._print(f"Answer received in {elapsed:.2f}s", Colors.GREEN, Emoji.SUCCESS)
 
-                # Print the answer
                 self._print_answer(data.get("answer", "No answer received."))
 
-                # Print stats if requested
                 if show_stats:
                     self._print_stats(data)
 
@@ -220,29 +297,36 @@ class NovaRAGCLI:
             print(f"  Total Cost:    {Colors.GREEN}${stats.get('total_cost_usd', 0):.4f}{Colors.RESET}\n")
 
         print(f"{Colors.DIM}Type your questions about Pydantic AI below.{Colors.RESET}")
-        print(f"{Colors.DIM}Commands: /quit, /stats, /health, /clear{Colors.RESET}\n")
+        print(f"{Colors.DIM}Type {Colors.CYAN}/help{Colors.RESET} for available commands.\n")
 
         while True:
             try:
-                user_input = input(f"{Colors.BOLD}{Colors.GREEN}nova>{Colors.RESET} ").strip()
+                user_input = self.session_prompt.prompt(
+                    HTML('<b><style fg="green">nova&gt;</style></b> '),
+                )
 
-                if not user_input:
+                if not user_input.strip():
                     continue
 
                 # Handle commands
-                if user_input.lower() in ["/quit", "/exit", "/q"]:
+                cmd = user_input.lower().strip()
+
+                if cmd in ["/quit", "/exit", "/q"]:
                     self._print("Goodbye!", Colors.CYAN, Emoji.INFO)
                     break
-                elif user_input.lower() == "/stats":
+                elif cmd == "/stats":
                     stats = self.get_stats()
                     if stats:
                         self._print_stats(stats)
                     continue
-                elif user_input.lower() == "/health":
+                elif cmd == "/health":
                     self.health_check()
                     continue
-                elif user_input.lower() == "/clear":
+                elif cmd == "/clear":
                     os.system("clear" if os.name != "nt" else "cls")
+                    continue
+                elif cmd == "/help":
+                    self._print_help()
                     continue
 
                 # Regular query
@@ -252,6 +336,7 @@ class NovaRAGCLI:
             except KeyboardInterrupt:
                 print(f"\n{Colors.YELLOW}Interrupted. Type /quit to exit.{Colors.RESET}")
             except EOFError:
+                self._print("\nGoodbye!", Colors.CYAN, Emoji.INFO)
                 break
 
 
@@ -275,10 +360,17 @@ Examples:
   python novarag_cli.py -q "How to create an agent?" --url http://localhost:8000
 
 Commands in interactive mode:
-  /quit     Exit the CLI
+  /help     Show available commands
   /stats    Show overall statistics
   /health   Check service health
   /clear    Clear the screen
+  /quit     Exit the CLI
+
+Features:
+  • Arrow keys for navigation and editing
+  • Tab completion for commands
+  • Ctrl+R for reverse history search
+  • Persistent command history
         """
     )
 

@@ -94,22 +94,22 @@ def create_app() -> "FastAPI":
         """Initialize the agent on startup."""
         global rag_agent, db
         try:
-            from main import rag_agent as agent, db as database
+            from main import rag_agent as agent, get_or_reconnect_db, is_supabase
             rag_agent = agent
-            db = database
+            # Test database connection
+            db = get_or_reconnect_db()
             logger.info("NovaRAG agent initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize agent: {e}")
             raise
 
-    # Health check endpoint
+    # Health check endpoint (no DB ping - just check agent is initialized)
     @app.get("/health", response_model=HealthResponse)
     async def health_check():
-        """Health check endpoint."""
-        from main import is_supabase
-        db_type = "Supabase" if is_supabase(db) else "RDS PostgreSQL" if db else "None"
+        """Health check endpoint - lightweight, no DB ping."""
+        db_type = "PostgreSQL (Neon)"
         return HealthResponse(
-            status="healthy" if rag_agent and db else "initializing",
+            status="healthy" if rag_agent else "initializing",
             timestamp=datetime.utcnow().isoformat(),
             database=db_type,
         )
@@ -125,10 +125,10 @@ def create_app() -> "FastAPI":
             )
 
         try:
-            from main import Deps
+            from main import Deps, get_or_reconnect_db
 
             start_time = time.time()
-            deps = Deps(db=db)
+            deps = Deps(db=get_or_reconnect_db())
             result = await rag_agent.run(request.question, deps=deps)
             elapsed_ms = int((time.time() - start_time) * 1000)
 

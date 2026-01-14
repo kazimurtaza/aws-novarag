@@ -25,3 +25,6 @@ aws-lambda-logging>=0.1.1
 # API Server
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
+
+# CLI
+prompt-toolkit>=3.0.0
