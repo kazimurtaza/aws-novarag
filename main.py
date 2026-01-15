@@ -519,8 +519,9 @@ async def get_page_content(
 class MetricsTracker:
     """Track query metrics."""
     PRICING = {
-        "amazon.nova-lite-v1:0": {"input": 0.15, "output": 0.60},
-        "amazon.nova-2-lite-v1:0": {"input": 0.06, "output": 0.24},
+        "amazon.nova-lite-v1:0": {"input": 0.06, "output": 0.24},
+        "global.amazon.nova-2-lite-v1:0": {"input": 0.30, "output": 2.50},
+        "amazon.nova-2-lite-v1:0": {"input": 0.30, "output": 2.50},
         "amazon.titan-embed-text-v2:0": {"input": 0.02, "output": 0.0},
     }
 
@@ -540,7 +541,7 @@ class MetricsTracker:
         elapsed_ms = int((time.time() - self.start_time) * 1000) if self.start_time else 0
 
         # Use provided model IDs or fallback to env vars or defaults
-        chat_id = chat_model_id or os.getenv("BEDROCK_NOVA_MODEL_ID", "amazon.nova-2-lite-v1:0")
+        chat_id = chat_model_id or os.getenv("BEDROCK_NOVA_MODEL_ID", "amazon.nova-lite-v1:0")
         embed_id = embedding_model_id or os.getenv("BEDROCK_EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
 
         chat_pricing = self.PRICING.get(chat_id, {"input": 0.06, "output": 0.24})
