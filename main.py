@@ -118,12 +118,12 @@ class Deps:
 # ==============
 
 class BedrockEmbeddingModel:
-    """AWS Bedrock embedding model for Titan v2."""
+    """AWS Bedrock embedding model."""
 
-    def __init__(self, region: str = "ap-southeast-2"):
+    def __init__(self, region: str = "ap-southeast-2", model_id: str = None):
         import boto3
         self.client = boto3.client("bedrock-runtime", region_name=region)
-        self.model_name = "amazon.titan-embed-text-v2:0"
+        self.model_name = model_id or os.getenv("BEDROCK_EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
 
     async def get_embedding(self, text: str) -> List[float]:
         """Get 1024-dim embedding for text."""
@@ -140,7 +140,10 @@ class BedrockEmbeddingModel:
 aws_region = os.getenv("AWS_REGION", "ap-southeast-2")
 from pydantic_ai.providers.bedrock import BedrockProvider
 bedrock_provider = BedrockProvider(region_name=aws_region)
-chat_model = BedrockConverseModel('amazon.nova-lite-v1:0', provider=bedrock_provider)
+chat_model = BedrockConverseModel(
+    os.getenv("BEDROCK_NOVA_MODEL_ID", "amazon.nova-2-lite-v1:0"),
+    provider=bedrock_provider
+)
 embedding_model = BedrockEmbeddingModel(region=aws_region)
 
 
@@ -517,6 +520,7 @@ class MetricsTracker:
     """Track query metrics."""
     PRICING = {
         "amazon.nova-lite-v1:0": {"input": 0.15, "output": 0.60},
+        "amazon.nova-2-lite-v1:0": {"input": 0.06, "output": 0.24},
         "amazon.titan-embed-text-v2:0": {"input": 0.02, "output": 0.0},
     }
 
@@ -531,15 +535,22 @@ class MetricsTracker:
         import time
         self.start_time = time.time()
 
-    def get_summary(self) -> dict:
+    def get_summary(self, chat_model_id: str = None, embedding_model_id: str = None) -> dict:
         import time
         elapsed_ms = int((time.time() - self.start_time) * 1000) if self.start_time else 0
 
+        # Use provided model IDs or fallback to env vars or defaults
+        chat_id = chat_model_id or os.getenv("BEDROCK_NOVA_MODEL_ID", "amazon.nova-2-lite-v1:0")
+        embed_id = embedding_model_id or os.getenv("BEDROCK_EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
+
+        chat_pricing = self.PRICING.get(chat_id, {"input": 0.06, "output": 0.24})
+        embed_pricing = self.PRICING.get(embed_id, {"input": 0.02, "output": 0.0})
+
         chat_cost = (
-            self.input_tokens * self.PRICING["amazon.nova-lite-v1:0"]["input"] / 1_000_000 +
-            self.output_tokens * self.PRICING["amazon.nova-lite-v1:0"]["output"] / 1_000_000
+            self.input_tokens * chat_pricing["input"] / 1_000_000 +
+            self.output_tokens * chat_pricing["output"] / 1_000_000
         )
-        embedding_cost = self.embedding_tokens * self.PRICING["amazon.titan-embed-text-v2:0"]["input"] / 1_000_000
+        embedding_cost = self.embedding_tokens * embed_pricing["input"] / 1_000_000
 
         return {
             "latency_ms": elapsed_ms,
@@ -586,7 +597,7 @@ async def main():
 
     db_type = "Supabase" if is_supabase(db) else "AWS RDS PostgreSQL"
     print(f"Connected to: {db_type}")
-    print(f"Model: amazon.nova-lite-v1:0")
+    print(f"Model: {os.getenv('BEDROCK_NOVA_MODEL_ID', 'amazon.nova-2-lite-v1:0')}")
     print(f"Region: {aws_region}")
     print()
     print("Type 'quit' to exit")

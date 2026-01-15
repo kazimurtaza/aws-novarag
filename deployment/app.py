@@ -216,8 +216,8 @@ def create_app() -> "FastAPI":
                 "stats": "GET /stats",
             },
             "models": {
-                "chat": "amazon.nova-lite-v1:0",
-                "embeddings": "amazon.titan-embed-text-v2:0"
+                "chat": os.getenv("BEDROCK_NOVA_MODEL_ID", "amazon.nova-2-lite-v1:0"),
+                "embeddings": os.getenv("BEDROCK_EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
             }
         }
 

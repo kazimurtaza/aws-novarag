@@ -40,10 +40,10 @@ class DocumentChunk:
 class BedrockEmbeddingClient:
     """AWS Bedrock client for generating embeddings."""
 
-    def __init__(self, region: str = "ap-southeast-2"):
-        self.region = region
-        self.client = boto3.client("bedrock-runtime", region_name=region)
-        self.model_id = "amazon.titan-embed-text-v2:0"
+    def __init__(self, region: str = None, model_id: str = None):
+        self.region = region or os.getenv("AWS_REGION", "ap-southeast-2")
+        self.client = boto3.client("bedrock-runtime", region_name=self.region)
+        self.model_id = model_id or os.getenv("BEDROCK_EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
 
     async def get_embedding(self, text: str) -> List[float]:
         """Generate embedding for text."""
